@@ -34,6 +34,13 @@ pub const Token = union(enum) {
             .@"extern" => try writer.print("extern", .{}),
             .identifier => |val| try writer.print("identifier: {s}", .{val}),
             .number => |n| try writer.print("number: {d}", .{n}),
+            .@"if" => try writer.print("if", .{}),
+            .then => try writer.print("then", .{}),
+            .@"else" => try writer.print("else", .{}),
+            .@"for" => try writer.print("for", .{}),
+            .in => try writer.print("in", .{}),
+            .binary => try writer.print("binary", .{}),
+            .unary => try writer.print("unary", .{}),
             .character => |c| try writer.print("character: {c}", .{c}),
         }
         try writer.print("\n", .{});
