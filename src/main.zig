@@ -43,15 +43,26 @@ pub fn main(init: std.process.Init) !void {
     ;
     var parser = try Parser.init(allocator, source);
 
-    var jit = try Jit.init();
-    defer jit.deinit();
-    const host_symbols = runtime.hostSymbols();
-    try jit.registerHostSymbols(&host_symbols);
+    if (build_options.emit_object) {
+        var codegen = try Codegen.initObjectEmitter(allocator, .{
+            .dump_ir = build_options.dump_ir,
+            .emit_object = true,
+            .object_path = build_options.object_path,
+        });
+        defer codegen.deinit();
 
-    var codegen = try Codegen.initWithOptions(allocator, &jit, .{
-        .dump_ir = build_options.dump_ir,
-    });
-    defer codegen.deinit();
+        try codegen.process(&parser);
+    } else {
+        var jit = try Jit.init();
+        defer jit.deinit();
+        const host_symbols = runtime.hostSymbols();
+        try jit.registerHostSymbols(&host_symbols);
 
-    try codegen.process(&parser);
+        var codegen = try Codegen.initWithOptions(allocator, &jit, .{
+            .dump_ir = build_options.dump_ir,
+        });
+        defer codegen.deinit();
+
+        try codegen.process(&parser);
+    }
 }

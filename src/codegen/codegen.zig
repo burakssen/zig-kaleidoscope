@@ -9,17 +9,22 @@ pub const CodegenError = @import("errors.zig").CodegenError;
 
 pub const Options = struct {
     dump_ir: bool = false,
+    emit_object: bool = false,
+    object_path: []const u8 = "output.o",
 };
 
 const Codegen = @This();
 
 allocator: std.mem.Allocator,
-jit: *Jit,
+jit: ?*Jit,
 options: Options,
 
 context: llvm.types.LLVMContextRef = null,
 module: llvm.types.LLVMModuleRef = null,
 builder: llvm.types.LLVMBuilderRef = null,
+target_machine: llvm.types.LLVMTargetMachineRef = null,
+target_data: llvm.types.LLVMTargetDataRef = null,
+target_triple: ?[:0]u8 = null,
 
 named_values: std.StringHashMap(llvm.types.LLVMValueRef),
 function_protos: std.StringHashMap(*const Parser.Expr.Prototype),
@@ -41,10 +46,28 @@ pub fn initWithOptions(allocator: std.mem.Allocator, jit: *Jit, options: Options
     return self;
 }
 
+pub fn initObjectEmitter(allocator: std.mem.Allocator, options: Options) !Codegen {
+    var self = Codegen{
+        .allocator = allocator,
+        .jit = null,
+        .options = options,
+        .named_values = .init(allocator),
+        .function_protos = .init(allocator),
+    };
+    errdefer self.deinit();
+
+    try self.initObjectTarget();
+    try self.startNewModule();
+    return self;
+}
+
 pub fn deinit(self: *Codegen) void {
     if (self.builder) |builder| llvm.core.LLVMDisposeBuilder(builder);
     if (self.module) |module| llvm.core.LLVMDisposeModule(module);
     if (self.context) |context| llvm.core.LLVMContextDispose(context);
+    if (self.target_data) |target_data| llvm.target.LLVMDisposeTargetData(target_data);
+    if (self.target_machine) |target_machine| llvm.target_machine.LLVMDisposeTargetMachine(target_machine);
+    if (self.target_triple) |target_triple| self.allocator.free(target_triple);
 
     self.named_values.deinit();
     self.function_protos.deinit();
@@ -77,6 +100,54 @@ fn cstr(self: *Codegen, text: []const u8) ![:0]u8 {
     return session.cstr(self, text);
 }
 
+fn initObjectTarget(self: *Codegen) CodegenError!void {
+    llvm.target.LLVMInitializeAllTargetInfos();
+    llvm.target.LLVMInitializeAllTargets();
+    llvm.target.LLVMInitializeAllTargetMCs();
+    llvm.target.LLVMInitializeAllAsmPrinters();
+    llvm.target.LLVMInitializeAllAsmParsers();
+
+    const default_triple_c = llvm.target_machine.LLVMGetDefaultTargetTriple();
+    defer llvm.core.LLVMDisposeMessage(default_triple_c);
+
+    const default_triple = std.mem.span(default_triple_c);
+    const target_triple = if (std.mem.startsWith(u8, default_triple, "arm64-apple-darwin"))
+        try std.fmt.allocPrintSentinel(self.allocator, "aarch64{s}", .{default_triple["arm64".len..]}, 0)
+    else
+        try self.allocator.dupeZ(u8, default_triple);
+    errdefer self.allocator.free(target_triple);
+
+    var target: llvm.types.LLVMTargetRef = null;
+    var error_message: [*c]u8 = null;
+    if (llvm.target_machine.LLVMGetTargetFromTriple(target_triple.ptr, &target, &error_message) != 0) {
+        defer if (error_message != null) llvm.core.LLVMDisposeMessage(error_message);
+        if (error_message != null) {
+            std.debug.print("LLVM target lookup failed: {s}\n", .{std.mem.span(error_message)});
+        }
+        return CodegenError.LLVMTargetLookupFailed;
+    }
+
+    const target_machine = llvm.target_machine.LLVMCreateTargetMachine(
+        target,
+        target_triple.ptr,
+        "generic",
+        "",
+        .LLVMCodeGenLevelDefault,
+        .LLVMRelocPIC,
+        .LLVMCodeModelDefault,
+    ) orelse return CodegenError.LLVMTargetMachineFailed;
+    errdefer llvm.target_machine.LLVMDisposeTargetMachine(target_machine);
+
+    const target_data = llvm.target_machine.LLVMCreateTargetDataLayout(target_machine) orelse {
+        return CodegenError.LLVMTargetMachineFailed;
+    };
+    errdefer llvm.target.LLVMDisposeTargetData(target_data);
+
+    self.target_triple = target_triple;
+    self.target_machine = target_machine;
+    self.target_data = target_data;
+}
+
 pub fn dumpValue(_: *Codegen, value: llvm.types.LLVMValueRef) void {
     debug.dumpValue(value);
 }
@@ -88,7 +159,12 @@ pub fn dumpModule(self: *Codegen) void {
 pub fn process(self: *Codegen, parser: *Parser) !void {
     while (true) {
         switch (parser.current) {
-            .eof => return,
+            .eof => {
+                if (self.options.emit_object) {
+                    try self.emitObjectFile();
+                }
+                return;
+            },
             .def => try self.handleDefinition(parser),
             .@"extern" => try self.handleExtern(parser),
             .character => |c| {
@@ -101,6 +177,31 @@ pub fn process(self: *Codegen, parser: *Parser) !void {
             else => try self.handleTopLevelExpression(parser),
         }
     }
+}
+
+pub fn emitObjectFile(self: *Codegen) CodegenError!void {
+    const module = try self.currentModule();
+    const target_machine = self.target_machine orelse return CodegenError.LLVMTargetMachineFailed;
+
+    const filename = try self.cstr(self.options.object_path);
+    defer self.allocator.free(filename);
+
+    var error_message: [*c]u8 = null;
+    if (llvm.target_machine.LLVMTargetMachineEmitToFile(
+        target_machine,
+        module,
+        filename.ptr,
+        .LLVMObjectFile,
+        &error_message,
+    ) != 0) {
+        defer if (error_message != null) llvm.core.LLVMDisposeMessage(error_message);
+        if (error_message != null) {
+            std.debug.print("LLVM object emission failed: {s}\n", .{std.mem.span(error_message)});
+        }
+        return CodegenError.LLVMObjectEmissionFailed;
+    }
+
+    std.debug.print("Wrote {s}\n", .{self.options.object_path});
 }
 
 fn handleDefinition(self: *Codegen, parser: *Parser) !void {
@@ -162,9 +263,12 @@ fn handleTopLevelExpression(self: *Codegen, parser: *Parser) !void {
         self.dumpValue(function);
     }
 
+    if (self.options.emit_object) return;
+
     try self.submitModuleToJitAndOpenNewModule();
 
-    const address = self.jit.lookup(self.allocator, function_name) catch |err| {
+    const jit = self.jit orelse return CodegenError.MissingJit;
+    const address = jit.lookup(self.allocator, function_name) catch |err| {
         std.debug.print("Error while looking up generated function: {s}\n", .{@errorName(err)});
         return;
     };
@@ -549,7 +653,7 @@ fn codegenForExpr(self: *Codegen, for_expr: Parser.Expr.ForExpr) CodegenError!ll
         try self.codegenExpr(step_expr)
     else
         llvm.core.LLVMConstReal(self.doubleType(), 1.0);
-.
+
     var end_cond = try self.codegenExpr(for_expr.end);
     end_cond = llvm.core.LLVMBuildFCmp(
         builder,

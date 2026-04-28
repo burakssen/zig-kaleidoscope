@@ -15,8 +15,19 @@ pub fn startNewModule(self: anytype) CodegenError!void {
     };
     errdefer llvm.core.LLVMDisposeModule(module);
 
-    llvm.core.LLVMSetDataLayout(module, self.jit.dataLayout());
-    llvm.core.LLVMSetTarget(module, self.jit.triple());
+    if (self.options.emit_object) {
+        const target_data = self.target_data orelse return CodegenError.LLVMTargetMachineFailed;
+        const target_triple = self.target_triple orelse return CodegenError.LLVMTargetMachineFailed;
+        const data_layout = llvm.target.LLVMCopyStringRepOfTargetData(target_data);
+        defer llvm.core.LLVMDisposeMessage(data_layout);
+
+        llvm.core.LLVMSetDataLayout(module, data_layout);
+        llvm.core.LLVMSetTarget(module, target_triple.ptr);
+    } else {
+        const jit = self.jit orelse return CodegenError.MissingJit;
+        llvm.core.LLVMSetDataLayout(module, jit.dataLayout());
+        llvm.core.LLVMSetTarget(module, jit.triple());
+    }
 
     const builder = llvm.core.LLVMCreateBuilderInContext(context) orelse {
         return CodegenError.LLVMInitFailed;
@@ -30,7 +41,8 @@ pub fn startNewModule(self: anytype) CodegenError!void {
 
 pub fn submitModuleToJitAndOpenNewModule(self: anytype) CodegenError!void {
     const tsm = try takeThreadSafeModule(self);
-    try self.jit.addModule(tsm);
+    const jit = self.jit orelse return CodegenError.MissingJit;
+    try jit.addModule(tsm);
     try startNewModule(self);
 }
 

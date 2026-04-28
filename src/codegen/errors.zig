@@ -14,4 +14,8 @@ pub const CodegenError = error{
     UnknownUnaryOperator,
     UnknownBinaryOperator,
     AssignmentDestinationMustBeVariable,
+    MissingJit,
+    LLVMTargetLookupFailed,
+    LLVMTargetMachineFailed,
+    LLVMObjectEmissionFailed,
 } || std.mem.Allocator.Error || Jit.JitError;

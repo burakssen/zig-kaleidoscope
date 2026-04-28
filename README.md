@@ -61,6 +61,21 @@ Print generated LLVM IR while running:
 zig build run -Ddump-ir=true
 ```
 
+## Emit Object Code
+
+Compile the embedded sample program to a native object file instead of running it
+through the JIT:
+
+```sh
+zig build run -Demit-object=true
+```
+
+The default output path is `output.o`. Override it with:
+
+```sh
+zig build run -Demit-object=true -Dobject-path=custom.o
+```
+
 ## Project Layout
 
 - `src/lexer`: tokenization.

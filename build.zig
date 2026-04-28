@@ -11,8 +11,12 @@ pub fn build(b: *std.Build) void {
 
     const llvm_mod = llvm_dep.module("llvm");
     const dump_ir = b.option(bool, "dump-ir", "Print generated LLVM IR while running") orelse false;
+    const emit_object = b.option(bool, "emit-object", "Emit native object code instead of JIT-running top-level expressions") orelse false;
+    const object_path = b.option([]const u8, "object-path", "Object file output path") orelse "output.o";
     const build_options = b.addOptions();
     build_options.addOption(bool, "dump_ir", dump_ir);
+    build_options.addOption(bool, "emit_object", emit_object);
+    build_options.addOption([]const u8, "object_path", object_path);
 
     const lexer_mod = b.createModule(.{
         .target = target,
