@@ -24,6 +24,10 @@ pub const ParserError = error{
     ExpectedBinaryOperator,
     InvalidPrecedence,
     InvalidNumberOfOperatorOperands,
+
+    ExpectedIdentifierAfterVar,
+    ExpectedIdentifierListAfterVar,
+    ExpectedInAfterVar,
 } || std.mem.Allocator.Error || Lexer.LexError;
 
 const Parser = @This();
@@ -88,6 +92,62 @@ fn makeFunction(self: *Parser, function: Expr.Function) !*Expr.Function {
     const node = try self.allocator.create(Expr.Function);
     node.* = function;
     return node;
+}
+
+/// varexpr ::= 'var' identifier ('=' expression)?
+///                     (',' identifier ('=' expression)?)*
+fn parseVarExpr(self: *Parser) !*Expr {
+    try self.advance(); // eat 'var'
+
+    var bindings: std.ArrayList(Expr.VarBinding) = .empty;
+    defer bindings.deinit(self.allocator);
+
+    if (self.current != .identifier) {
+        return ParserError.ExpectedIdentifierAfterVar;
+    }
+
+    while (true) {
+        const name = switch (self.current) {
+            .identifier => |identifier| identifier,
+            else => return ParserError.ExpectedIdentifierAfterVar,
+        };
+
+        try self.advance(); // eat identifier
+
+        var initialize: ?*Expr = null;
+        if (self.isChar('=')) {
+            try self.advance(); // eat '='
+            initialize = try self.parseExpression();
+        }
+
+        try bindings.append(self.allocator, .{
+            .name = name,
+            .init = initialize,
+        });
+
+        if (!self.isChar(',')) break;
+        try self.advance(); // eat ','
+
+        if (self.current != .identifier) {
+            return ParserError.ExpectedIdentifierListAfterVar;
+        }
+    }
+
+    if (self.current != .in) {
+        return ParserError.ExpectedInAfterVar;
+    }
+
+    try self.advance(); // eat 'in'
+
+    const body = try self.parseExpression();
+    const owned_bindings = try bindings.toOwnedSlice(self.allocator);
+
+    return self.makeExpr(.{
+        .var_expr = .{
+            .bindings = owned_bindings,
+            .body = body,
+        },
+    });
 }
 
 /// numberexpr ::= number
@@ -285,6 +345,7 @@ fn parsePrimary(self: *Parser) ParserError!*Expr {
         .character => |c| if (c == '(') self.parseParenExpr() else ParserError.ExpectedExpression,
         .@"if" => self.parseIfExpr(),
         .@"for" => self.parseForExpr(),
+        .@"var" => self.parseVarExpr(),
         else => ParserError.ExpectedExpression,
     };
 }

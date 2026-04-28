@@ -58,6 +58,7 @@ fn identifier(self: *Lexer) Token {
     if (std.mem.eql(u8, text, "in")) return .in;
     if (std.mem.eql(u8, text, "binary")) return .binary;
     if (std.mem.eql(u8, text, "unary")) return .unary;
+    if (std.mem.eql(u8, text, "var")) return .@"var";
 
     return .{ .identifier = text };
 }

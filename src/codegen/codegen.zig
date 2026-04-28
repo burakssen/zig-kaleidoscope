@@ -182,11 +182,9 @@ pub fn codegenExpr(self: *Codegen, expr: *const Parser.Expr) CodegenError!llvm.t
         .unary => |unary| self.codegenUnary(unary),
         .binary => |binary| self.codegenBinary(binary),
         .call => |call| self.codegenCall(call),
-        .if_expr => |if_expr| self.codegenIf(if_expr),
+        .if_expr => |if_expr| self.codegenIfExpr(if_expr),
         .for_expr => |for_expr| self.codegenForExpr(for_expr),
-
-        // If Chapter 7 is already present:
-        // .var_expr => |var_expr| self.codegenVar(var_expr),
+        .var_expr => |var_expr| self.codegenVarExpr(var_expr),
     };
 }
 
@@ -194,12 +192,20 @@ fn codegenNumber(self: *Codegen, value: f64) !llvm.types.LLVMValueRef {
     return llvm.core.LLVMConstReal(self.doubleType(), value);
 }
 
-fn codegenVariable(self: *Codegen, name: []const u8) !llvm.types.LLVMValueRef {
-    if (self.named_values.get(name)) |value| {
-        return value;
-    }
+fn codegenVariable(self: *Codegen, name: []const u8) CodegenError!llvm.types.LLVMValueRef {
+    const alloca = self.named_values.get(name) orelse {
+        return CodegenError.UnknownVariableName;
+    };
 
-    return CodegenError.UnknownVariableName;
+    const name_z = try self.cstr(name);
+    defer self.allocator.free(name_z);
+
+    return llvm.core.LLVMBuildLoad2(
+        try self.currentBuilder(),
+        self.doubleType(),
+        alloca,
+        name_z.ptr,
+    ) orelse CodegenError.LLVMInitFailed;
 }
 
 fn codegenUnary(self: *Codegen, unary: Parser.Expr.UnaryExpr) CodegenError!llvm.types.LLVMValueRef {
@@ -228,6 +234,22 @@ fn codegenUnary(self: *Codegen, unary: Parser.Expr.UnaryExpr) CodegenError!llvm.
 fn codegenBinary(self: *Codegen, binary: Parser.Expr.BinaryExpr) CodegenError!llvm.types.LLVMValueRef {
     const builder = try self.currentBuilder();
 
+    if (binary.op == '=') {
+        const variable_name = switch (binary.lhs.*) {
+            .variable => |name| name,
+            else => return CodegenError.AssignmentDestinationMustBeVariable,
+        };
+
+        const value = try self.codegenExpr(binary.rhs);
+
+        const alloca = self.named_values.get(variable_name) orelse {
+            return CodegenError.UnknownVariableName;
+        };
+
+        _ = llvm.core.LLVMBuildStore(builder, value, alloca);
+        return value;
+    }
+
     var lhs = try self.codegenExpr(binary.lhs);
     const rhs = try self.codegenExpr(binary.rhs);
 
@@ -236,13 +258,20 @@ fn codegenBinary(self: *Codegen, binary: Parser.Expr.BinaryExpr) CodegenError!ll
         '-' => llvm.core.LLVMBuildFSub(builder, lhs, rhs, "subtmp") orelse CodegenError.LLVMInitFailed,
         '*' => llvm.core.LLVMBuildFMul(builder, lhs, rhs, "multmp") orelse CodegenError.LLVMInitFailed,
         '<' => blk: {
-            lhs = llvm.core.LLVMBuildFCmp(builder, .LLVMRealULT, lhs, rhs, "cmptmp") orelse {
-                return CodegenError.LLVMInitFailed;
-            };
+            lhs = llvm.core.LLVMBuildFCmp(
+                builder,
+                .LLVMRealULT,
+                lhs,
+                rhs,
+                "cmptmp",
+            ) orelse return CodegenError.LLVMInitFailed;
 
-            break :blk llvm.core.LLVMBuildUIToFP(builder, lhs, self.doubleType(), "booltmp") orelse {
-                return CodegenError.LLVMInitFailed;
-            };
+            break :blk llvm.core.LLVMBuildUIToFP(
+                builder,
+                lhs,
+                self.doubleType(),
+                "booltmp",
+            ) orelse return CodegenError.LLVMInitFailed;
         },
         else => self.codegenUserBinary(binary.op, lhs, rhs),
     };
@@ -377,9 +406,15 @@ pub fn codegenFunction(self: *Codegen, function_ast: *const Parser.Expr.Function
 
     for (function_ast.proto.args, 0..) |arg_name, index| {
         const param = llvm.core.LLVMGetParam(function, @intCast(index));
+
         const c_arg_name = try self.cstr(arg_name);
+        defer self.allocator.free(c_arg_name);
         llvm.core.LLVMSetValueName2(param, c_arg_name.ptr, arg_name.len);
-        try self.named_values.put(arg_name, param);
+
+        const alloca = try self.createEntryBlockAlloca(function, arg_name);
+        _ = llvm.core.LLVMBuildStore(try self.currentBuilder(), param, alloca);
+
+        try self.named_values.put(arg_name, alloca);
     }
 
     const return_value = self.codegenExpr(function_ast.body) catch |err| {
@@ -410,7 +445,7 @@ fn currentFunction(self: *Codegen) CodegenError!llvm.types.LLVMValueRef {
     };
 }
 
-fn codegenIf(self: *Codegen, if_expr: Parser.Expr.IfExpr) CodegenError!llvm.types.LLVMValueRef {
+fn codegenIfExpr(self: *Codegen, if_expr: Parser.Expr.IfExpr) CodegenError!llvm.types.LLVMValueRef {
     const builder = try self.currentBuilder();
 
     var cond_value = try self.codegenExpr(if_expr.cond);
@@ -486,46 +521,27 @@ fn codegenIf(self: *Codegen, if_expr: Parser.Expr.IfExpr) CodegenError!llvm.type
 
 fn codegenForExpr(self: *Codegen, for_expr: Parser.Expr.ForExpr) CodegenError!llvm.types.LLVMValueRef {
     const builder = try self.currentBuilder();
-
-    // Emit the start expression before the loop variable is in scope.
-    const start_value = try self.codegenExpr(for_expr.start);
-
     const function = try self.currentFunction();
 
-    const preheader_bb = llvm.core.LLVMGetInsertBlock(builder) orelse {
-        return CodegenError.LLVMInitFailed;
-    };
+    const alloca = try self.createEntryBlockAlloca(function, for_expr.var_name);
+
+    // Emit the start value before the loop variable is put into scope.
+    const start_value = try self.codegenExpr(for_expr.start);
+    _ = llvm.core.LLVMBuildStore(builder, start_value, alloca);
 
     const loop_bb = llvm.core.LLVMAppendBasicBlockInContext(
-        self.context,
+        self.context.?,
         function,
         "loop",
     ) orelse return CodegenError.LLVMInitFailed;
 
-    // Explicit fallthrough from current block to loop block.
     _ = llvm.core.LLVMBuildBr(builder, loop_bb);
-
-    // Start insertion in the loop block.
     llvm.core.LLVMPositionBuilderAtEnd(builder, loop_bb);
 
-    const var_name_z = try self.cstr(for_expr.var_name);
-    defer self.allocator.free(var_name_z);
-
-    const variable = llvm.core.LLVMBuildPhi(
-        builder,
-        self.doubleType(),
-        var_name_z.ptr,
-    ) orelse return CodegenError.LLVMInitFailed;
-
-    var start_values = [_]llvm.types.LLVMValueRef{start_value};
-    var start_blocks = [_]llvm.types.LLVMBasicBlockRef{preheader_bb};
-    llvm.core.LLVMAddIncoming(variable, &start_values, &start_blocks, 1);
-
-    // The loop variable shadows any existing variable with the same name.
     const old_value = self.named_values.get(for_expr.var_name);
-    try self.named_values.put(for_expr.var_name, variable);
+    try self.named_values.put(for_expr.var_name, alloca);
 
-    // Emit the body. The value is ignored, but errors still matter.
+    // Emit the loop body.
     _ = try self.codegenExpr(for_expr.body);
 
     // Emit the step value, defaulting to 1.0.
@@ -533,15 +549,7 @@ fn codegenForExpr(self: *Codegen, for_expr: Parser.Expr.ForExpr) CodegenError!ll
         try self.codegenExpr(step_expr)
     else
         llvm.core.LLVMConstReal(self.doubleType(), 1.0);
-
-    const next_var = llvm.core.LLVMBuildFAdd(
-        builder,
-        variable,
-        step_value,
-        "nextvar",
-    );
-
-    // Compute the loop condition.
+.
     var end_cond = try self.codegenExpr(for_expr.end);
     end_cond = llvm.core.LLVMBuildFCmp(
         builder,
@@ -549,35 +557,101 @@ fn codegenForExpr(self: *Codegen, for_expr: Parser.Expr.ForExpr) CodegenError!ll
         end_cond,
         llvm.core.LLVMConstReal(self.doubleType(), 0.0),
         "loopcond",
-    );
+    ) orelse return CodegenError.LLVMInitFailed;
 
-    const loop_end_bb = llvm.core.LLVMGetInsertBlock(builder) orelse {
-        return CodegenError.LLVMInitFailed;
-    };
+    const current_var = llvm.core.LLVMBuildLoad2(
+        builder,
+        self.doubleType(),
+        alloca,
+        "curvar",
+    ) orelse return CodegenError.LLVMInitFailed;
+
+    const next_var = llvm.core.LLVMBuildFAdd(
+        builder,
+        current_var,
+        step_value,
+        "nextvar",
+    ) orelse return CodegenError.LLVMInitFailed;
+
+    _ = llvm.core.LLVMBuildStore(builder, next_var, alloca);
 
     const after_bb = llvm.core.LLVMAppendBasicBlockInContext(
-        self.context,
+        self.context.?,
         function,
         "afterloop",
     ) orelse return CodegenError.LLVMInitFailed;
 
     _ = llvm.core.LLVMBuildCondBr(builder, end_cond, loop_bb, after_bb);
 
-    // Add the backedge value to the induction-variable PHI.
-    var next_values = [_]llvm.types.LLVMValueRef{next_var};
-    var next_blocks = [_]llvm.types.LLVMBasicBlockRef{loop_end_bb};
-    llvm.core.LLVMAddIncoming(variable, &next_values, &next_blocks, 1);
-
-    // Continue inserting after the loop.
     llvm.core.LLVMPositionBuilderAtEnd(builder, after_bb);
 
-    // Restore shadowed variable.
     if (old_value) |value| {
         try self.named_values.put(for_expr.var_name, value);
     } else {
         _ = self.named_values.remove(for_expr.var_name);
     }
 
-    // for expressions always evaluate to 0.0.
-    return llvm.core.LLVMConstReal(self.doubleType(), 0.0);
+    return llvm.core.LLVMConstReal(self.doubleType(), 0.0);}
+fn createEntryBlockAlloca(
+    self: *Codegen,
+    function: llvm.types.LLVMValueRef,
+    name: []const u8,
+) CodegenError!llvm.types.LLVMValueRef {
+    const entry = llvm.core.LLVMGetEntryBasicBlock(function) orelse {
+        return CodegenError.LLVMInitFailed;
+    };
+
+    const tmp_builder = llvm.core.LLVMCreateBuilderInContext(self.context.?) orelse {
+        return CodegenError.LLVMInitFailed;
+    };
+    defer llvm.core.LLVMDisposeBuilder(tmp_builder);
+
+    if (llvm.core.LLVMGetFirstInstruction(entry)) |first_inst| {
+        llvm.core.LLVMPositionBuilderBefore(tmp_builder, first_inst);
+    } else {
+        llvm.core.LLVMPositionBuilderAtEnd(tmp_builder, entry);
+    }
+
+    const name_z = try self.cstr(name);
+    defer self.allocator.free(name_z);
+
+    return llvm.core.LLVMBuildAlloca(
+        tmp_builder,
+        self.doubleType(),
+        name_z.ptr,
+    ) orelse CodegenError.LLVMInitFailed;
+}
+
+fn codegenVarExpr(self: *Codegen, var_expr: Parser.Expr.VarExpr) CodegenError!llvm.types.LLVMValueRef {
+    const builder = try self.currentBuilder();
+    const function = try self.currentFunction();
+
+    var old_bindings: std.ArrayList(?llvm.types.LLVMValueRef) = .empty;
+    defer old_bindings.deinit(self.allocator);
+
+    for (var_expr.bindings) |binding| {
+        // Emit initializer before the new variable shadows an existing name.
+        const init_value = if (binding.init) |init_expr|
+            try self.codegenExpr(init_expr)
+        else
+            llvm.core.LLVMConstReal(self.doubleType(), 0.0);
+
+        const alloca = try self.createEntryBlockAlloca(function, binding.name);
+        _ = llvm.core.LLVMBuildStore(builder, init_value, alloca);
+
+        try old_bindings.append(self.allocator, self.named_values.get(binding.name));
+        try self.named_values.put(binding.name, alloca);
+    }
+
+    const body_value = try self.codegenExpr(var_expr.body);
+
+    for (var_expr.bindings, 0..) |binding, index| {
+        if (old_bindings.items[index]) |old_value| {
+            try self.named_values.put(binding.name, old_value);
+        } else {
+            _ = self.named_values.remove(binding.name);
+        }
+    }
+
+    return body_value;
 }

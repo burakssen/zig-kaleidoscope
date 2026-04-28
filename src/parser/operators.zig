@@ -4,6 +4,7 @@ pub const PrecedenceTable = [256]i32;
 
 pub fn defaults() PrecedenceTable {
     var result = [_]i32{-1} ** 256;
+    result['='] = 2;
     result['<'] = 10;
     result['+'] = 20;
     result['-'] = 20;

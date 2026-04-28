@@ -13,45 +13,33 @@ pub fn main(init: std.process.Init) !void {
         \\extern putchard(char);
         \\extern printd(x);
         \\
-        \\# Logical unary not.
-        \\def unary!(v)
-        \\  if v then
-        \\    0
-        \\  else
-        \\    1;
+        \\# Chapter 6 sequencing operator.
+        \\def binary : 1 (x y) y;
         \\
-        \\# Unary negate.
-        \\def unary-(v)
-        \\  0 - v;
-        \\
-        \\# Define > with same precedence as <.
-        \\def binary> 10 (LHS RHS)
-        \\  RHS < LHS;
-        \\
-        \\# Logical or. This does not short-circuit.
-        \\def binary| 5 (LHS RHS)
-        \\  if LHS then
-        \\    1
-        \\  else if RHS then
+        \\def fib(x)
+        \\  if x < 3 then
         \\    1
         \\  else
-        \\    0;
+        \\    fib(x - 1) + fib(x - 2);
         \\
-        \\# Logical and. This does not short-circuit.
-        \\def binary& 6 (LHS RHS)
-        \\  if !LHS then
-        \\    0
-        \\  else
-        \\    !!RHS;
+        \\fib(10);
         \\
-        \\# Sequencing operator: evaluate x, then y, return y.
-        \\def binary : 1 (x y)
-        \\  y;
+        \\def test(x)
+        \\  printd(x) :
+        \\  x = 4 :
+        \\  printd(x);
         \\
-        \\printd(123) : printd(456) : printd(789);
-        \\printd(!(1 < 2));
-        \\printd(4 > 2);
-        \\printd(1 & 0 | 1);
+        \\test(123);
+        \\
+        \\def fibi(x)
+        \\  var a = 1, b = 1, c in
+        \\  (for i = 3, i < x in
+        \\     c = a + b :
+        \\     a = b :
+        \\     b = c) :
+        \\  b;
+        \\
+        \\fibi(10);
     ;
     var parser = try Parser.init(allocator, source);
 

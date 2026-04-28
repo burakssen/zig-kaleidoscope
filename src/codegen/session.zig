@@ -60,7 +60,7 @@ pub fn optimizeFunction(function: llvm.types.LLVMValueRef) CodegenError!void {
 
     const err = llvm.transform.LLVMRunPassesOnFunction(
         function,
-        "instcombine,reassociate,gvn,simplifycfg",
+        "mem2reg,instcombine,reassociate,gvn,simplifycfg",
         null,
         options,
     );

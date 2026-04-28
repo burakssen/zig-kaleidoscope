@@ -20,6 +20,7 @@ pub const Token = union(enum) {
 
     binary,
     unary,
+    @"var",
 
     // Any otherwise unknown character, such as '+', '-', '(', or ')'.
     character: u8,
@@ -41,6 +42,7 @@ pub const Token = union(enum) {
             .in => try writer.print("in", .{}),
             .binary => try writer.print("binary", .{}),
             .unary => try writer.print("unary", .{}),
+            .@"var" => try writer.print("var", .{}),
             .character => |c| try writer.print("character: {c}", .{c}),
         }
         try writer.print("\n", .{});

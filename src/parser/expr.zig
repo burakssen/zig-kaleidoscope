@@ -6,6 +6,7 @@ pub const Expr = union(enum) {
     call: CallExpr,
     if_expr: IfExpr,
     for_expr: ForExpr,
+    var_expr: VarExpr,
 
     pub const UnaryExpr = struct {
         op: u8,
@@ -34,6 +35,16 @@ pub const Expr = union(enum) {
         start: *Expr,
         end: *Expr,
         step: ?*Expr,
+        body: *Expr,
+    };
+
+    pub const VarBinding = struct {
+        name: []const u8,
+        init: ?*Expr,
+    };
+
+    pub const VarExpr = struct {
+        bindings: []const VarBinding,
         body: *Expr,
     };
 
